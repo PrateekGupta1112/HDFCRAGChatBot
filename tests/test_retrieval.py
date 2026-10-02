@@ -324,10 +324,16 @@ def test_mmr_prefers_diversity_over_near_duplicates() -> None:
     diversity mandate: at ``lam=0.7`` a chunk at 0.89 relevance legitimately
     beats one at 0.50, and ``test_mmr_keeps_relevance_when_diversity_is_weak``
     pins that the other half of the bargain also holds.
+
+    ``a`` and ``b`` are given *different* sections on purpose. Their redundancy is
+    by text, and that is the case the MMR redundancy term has to catch — two
+    chunks that are near-identical in wording even though they were cut from
+    different parts of the page. Same-section redundancy is already removed
+    earlier, by the section de-duplication in ``_mmr``.
     """
-    def candidate(cid: str, text: str, similarity: float) -> RetrievedChunk:
+    def candidate(cid: str, text: str, section: str, similarity: float) -> RetrievedChunk:
         return RetrievedChunk(
-            rank=0, chunk_id=cid, text=text, section="s", scheme_name="s",
+            rank=0, chunk_id=cid, text=text, section=section, scheme_name="s",
             source_url="https://example.com/s", fetched_at="2026-10-02",
             similarity=similarity, mmr_score=None,
         )
@@ -335,9 +341,9 @@ def test_mmr_prefers_diversity_over_near_duplicates() -> None:
     fees = "Section: Fees. Total expense ratio: 1.11%."
     bench = "Section: Benchmark. Benchmark: TRIX."
 
-    a = candidate("a", fees, 0.90)
-    b = candidate("b", fees, 0.89)      # byte-identical to a
-    c = candidate("c", bench, 0.88)     # distinct text, barely lower relevance
+    a = candidate("a", fees, "Fees", 0.90)
+    b = candidate("b", fees, "Fees (continued)", 0.89)   # byte-identical text to a
+    c = candidate("c", bench, "Benchmark", 0.88)         # distinct text, barely lower relevance
 
     picked = _mmr([a, b, c], k=2, lam=0.7)
     picked_ids = {p.chunk_id for p in picked}
@@ -352,9 +358,9 @@ def test_mmr_keeps_relevance_when_diversity_is_weak() -> None:
     ``lam=0.7`` the 0.89-relevant near-duplicate beats the 0.50-relevant
     distinct chunk, and that is the intended behaviour.
     """
-    def candidate(cid: str, text: str, similarity: float) -> RetrievedChunk:
+    def candidate(cid: str, text: str, section: str, similarity: float) -> RetrievedChunk:
         return RetrievedChunk(
-            rank=0, chunk_id=cid, text=text, section="s", scheme_name="s",
+            rank=0, chunk_id=cid, text=text, section=section, scheme_name="s",
             source_url="https://example.com/s", fetched_at="2026-10-02",
             similarity=similarity, mmr_score=None,
         )
@@ -362,9 +368,9 @@ def test_mmr_keeps_relevance_when_diversity_is_weak() -> None:
     fees = "Section: Fees. Total expense ratio: 1.11%."
     bench = "Section: Benchmark. Benchmark: TRIX."
 
-    a = candidate("a", fees, 0.90)
-    b = candidate("b", fees, 0.89)
-    c = candidate("c", bench, 0.50)
+    a = candidate("a", fees, "Fees", 0.90)
+    b = candidate("b", fees, "Fees (continued)", 0.89)
+    c = candidate("c", bench, "Benchmark", 0.50)
 
     picked = _mmr([a, b, c], k=2, lam=0.7)
     picked_ids = {p.chunk_id for p in picked}
@@ -373,9 +379,9 @@ def test_mmr_keeps_relevance_when_diversity_is_weak() -> None:
 
 def test_mmr_lambda_controls_the_relevance_diversity_balance() -> None:
     """Lower ``lam`` (more diversity weight) must retain the distinct chunk."""
-    def candidate(cid: str, text: str, similarity: float) -> RetrievedChunk:
+    def candidate(cid: str, text: str, section: str, similarity: float) -> RetrievedChunk:
         return RetrievedChunk(
-            rank=0, chunk_id=cid, text=text, section="s", scheme_name="s",
+            rank=0, chunk_id=cid, text=text, section=section, scheme_name="s",
             source_url="https://example.com/s", fetched_at="2026-10-02",
             similarity=similarity, mmr_score=None,
         )
@@ -383,14 +389,13 @@ def test_mmr_lambda_controls_the_relevance_diversity_balance() -> None:
     fees = "Section: Fees. Total expense ratio: 1.11%."
     bench = "Section: Benchmark. Benchmark: TRIX."
 
-    picked_high = _mmr(
-        [candidate("a", fees, 0.90), candidate("b", fees, 0.89), candidate("c", bench, 0.50)],
-        k=2, lam=0.9,
-    )
-    picked_low = _mmr(
-        [candidate("a", fees, 0.90), candidate("b", fees, 0.89), candidate("c", bench, 0.50)],
-        k=2, lam=0.1,
-    )
+    cands = [
+        candidate("a", fees, "Fees", 0.90),
+        candidate("b", fees, "Fees (continued)", 0.89),
+        candidate("c", bench, "Benchmark", 0.50),
+    ]
+    picked_high = _mmr(cands, k=2, lam=0.9)
+    picked_low = _mmr(cands, k=2, lam=0.1)
     assert {p.chunk_id for p in picked_low} == {"a", "c"}, "diversity weight did not take effect"
     assert {p.chunk_id for p in picked_high} != {"a", "c"}, (
         "a relevance weight of 0.9 should still favour the near-duplicate here"
@@ -398,29 +403,85 @@ def test_mmr_lambda_controls_the_relevance_diversity_balance() -> None:
 
 
 def test_mmr_first_pick_is_the_top_scoring_candidate() -> None:
-    def candidate(cid: str, similarity: float) -> RetrievedChunk:
+    # Distinct sections: with a shared one the section de-duplication would drop
+    # b and c before MMR ever scored them, leaving nothing to assert about.
+    def candidate(cid: str, section: str, similarity: float) -> RetrievedChunk:
         return RetrievedChunk(
-            rank=0, chunk_id=cid, text=f"text {cid}", section="s", scheme_name="s",
+            rank=0, chunk_id=cid, text=f"text {cid}", section=section, scheme_name="s",
             source_url="https://example.com/s", fetched_at="2026-10-02",
             similarity=similarity, mmr_score=None,
         )
 
-    cands = [candidate("a", 0.9), candidate("b", 0.5), candidate("c", 0.4)]
+    cands = [
+        candidate("a", "one", 0.9),
+        candidate("b", "two", 0.5),
+        candidate("c", "three", 0.4),
+    ]
     picked = _mmr(cands, k=3, lam=0.7)
+    assert len(picked) == 3
     assert picked[0].chunk_id == "a"
     assert picked[0].rank == 1
+    assert [c.rank for c in picked] == [1, 2, 3]
 
 
 def test_mmr_on_fewer_candidates_than_k_returns_them_all() -> None:
-    def candidate(cid: str) -> RetrievedChunk:
+    def candidate(cid: str, section: str) -> RetrievedChunk:
         return RetrievedChunk(
-            rank=0, chunk_id=cid, text=f"text {cid}", section="s", scheme_name="s",
+            rank=0, chunk_id=cid, text=f"text {cid}", section=section, scheme_name="s",
             source_url="https://example.com/s", fetched_at="2026-10-02",
             similarity=0.5, mmr_score=None,
         )
 
-    picked = _mmr([candidate("a"), candidate("b")], k=5, lam=0.7)
+    picked = _mmr([candidate("a", "one"), candidate("b", "two")], k=5, lam=0.7)
     assert [c.rank for c in picked] == [1, 2]
+    assert [c.chunk_id for c in picked] == ["a", "b"]
+
+
+def test_mmr_never_returns_two_chunks_from_the_same_section() -> None:
+    """Same-section chunks are near-duplicates by construction and share a slot.
+
+    HDFC Large Cap stores 18 chunks across only 14 distinct sections — Holdings
+    split three ways, ``DM Dhruv Muchhal Jun 2023 - Present View details`` twice.
+    Before this rule, raising ``top_k`` past 14 forced MMR to pad the result with
+    same-section duplicates and 15 of 15 golden queries repeated a section. The
+    higher ``top_k`` is what lets co-managers reach the prompt at all, so it is
+    only safe together with this de-duplication.
+    """
+    def candidate(cid: str, section: str, similarity: float) -> RetrievedChunk:
+        return RetrievedChunk(
+            rank=0, chunk_id=cid, text=f"text {cid}", section=section, scheme_name="s",
+            source_url="https://example.com/s", fetched_at="2026-10-02",
+            similarity=similarity, mmr_score=None,
+        )
+
+    # 6 candidates, only 3 distinct sections, k=6 -> only 3 can be returned.
+    cands = [
+        candidate("a1", "About", 0.90), candidate("a2", "About", 0.88),
+        candidate("h1", "Holdings", 0.80), candidate("h2", "Holdings", 0.79),
+        candidate("o1", "Objective", 0.70), candidate("o2", "Objective", 0.69),
+    ]
+    picked = _mmr(cands, k=6, lam=0.7)
+    sections = [c.section for c in picked]
+    assert len(set(sections)) == len(sections)
+    assert sorted(sections) == ["About", "Holdings", "Objective"]
+    # The surviving representative is the best-KNN one for its section, not an
+    # arbitrary member of the group.
+    assert [c.chunk_id for c in picked] == ["a1", "h1", "o1"]
+
+
+def test_mmr_section_dedup_does_not_starve_a_small_pool() -> None:
+    """If every candidate shares a section, one is still returned — never zero."""
+    def candidate(cid: str) -> RetrievedChunk:
+        return RetrievedChunk(
+            rank=0, chunk_id=cid, text=f"text {cid}", section="only", scheme_name="s",
+            source_url="https://example.com/s", fetched_at="2026-10-02",
+            similarity=0.5, mmr_score=None,
+        )
+
+    picked = _mmr([candidate("a"), candidate("b"), candidate("c")], k=5, lam=0.7)
+    assert len(picked) == 1
+    assert picked[0].chunk_id == "a"
+    assert picked[0].rank == 1
 
 
 def test_mmr_on_empty_input_returns_empty() -> None:

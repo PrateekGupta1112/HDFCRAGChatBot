@@ -204,6 +204,22 @@ def _mmr(
     redundancy term is unchanged.
     ``test_mmr_prefers_diversity_over_near_duplicates`` pins this behaviour.
 
+    **Candidates are de-duplicated by section before selection.** Two chunks with
+    the same ``section`` come from the same region of the same page and are
+    near-duplicates by construction — ``Holdings ( 87 )`` split across three
+    chunks, or ``DM Dhruv Muchhal Jun 2023 - Present View details`` stored twice.
+    Scoring them against each other is wasted work and admitting both wastes a
+    prompt slot. Collapsing them to the best-KNN representative first means every
+    slot in the prompt carries a different part of the page.
+
+    This is what makes a wider ``top_k`` safe. Without it, raising ``top_k`` past
+    the number of *distinct* sections a page has (HDFC Large Cap: 14 distinct
+    sections across 18 chunks) forces MMR to pad the result with same-section
+    duplicates, which is the exact failure MMR exists to prevent — measured at
+    top_k=16 before this change, 15 of 15 golden queries returned a repeated
+    section. With it, ``top_k`` can grow to cover co-managers and other
+    multi-value fields without the diversity invariant regressing.
+
     Args:
         cands: Candidates in descending KNN order. Must be non-empty.
         k: Maximum number to return.
@@ -212,17 +228,31 @@ def _mmr(
 
     Returns:
         At most ``k`` chunks with ``rank`` reassigned to ``1..k`` and
-        ``mmr_score`` populated.
+        ``mmr_score`` populated. Every returned chunk has a distinct ``section``,
+        unless the candidate pool itself held only one.
     """
     if not cands:
         return []
     if k <= 0:
         return []
-    if len(cands) <= k:
+
+    # Candidates arrive in descending KNN order, so the first chunk seen for a
+    # section is its most query-relevant representative and the one to keep.
+    seen_sections: set[str] = set()
+    distinct: list[RetrievedChunk] = []
+    for c in cands:
+        if c.section in seen_sections:
+            continue
+        seen_sections.add(c.section)
+        distinct.append(c)
+
+    if len(distinct) <= k:
         return [
             replace(c, rank=i + 1, mmr_score=c.similarity)
-            for i, c in enumerate(cands)
+            for i, c in enumerate(distinct)
         ]
+
+    cands = distinct
 
     # Vectors are L2-normalised, so the inner product is cosine similarity and no
     # separate normalisation step is needed.

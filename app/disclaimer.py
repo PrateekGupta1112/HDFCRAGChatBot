@@ -33,6 +33,7 @@ DISCLAIMER_SHORT = "Facts-only. No investment advice."
 WELCOME_LINE = (
     "Welcome: Ask factual questions about 5 HDFC mutual fund schemes. "
     "Every answer includes a source link."
+    "Try one of these:"
 )
 
 EXAMPLE_QUESTIONS: list[str] = [

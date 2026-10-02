@@ -58,8 +58,42 @@ class Settings(BaseSettings):
     chroma_collection: str = "mf_faq_v1"
 
     # Retrieval
-    retrieval_top_k: int = 5
-    retrieval_over_fetch: int = 8
+    retrieval_top_k: int = 12
+    """Raised 5 -> 8 -> 16 -> 12 on 2026-10-02. The final value is the smallest
+    that fixes both symptoms; the path there is the evidence.
+
+    **5 -> 8.** Each scheme page's key-value header (``Very High Risk ...
+    Expense ratio 1.04% Rating 4``) is a single chunk scoring ~0.78 for a short
+    attribute question — above ``min_similarity``, but MMR ranks the "About" prose
+    chunk above it because that prose paraphrases the question. At top_k=5 no
+    retrieved chunk contained the string ``Rating``, so "what is the rating of hdfc
+    large cap fund" was answered from the neighbouring sentence "The HDFC Large
+    Cap Fund Direct Growth is rated Very High risk" — Groww's own wording, so
+    grounded, but the wrong facet; the page's star rating is 4.
+
+    **8 -> 12.** Enumeration questions ("who *else* manages this fund?") could not
+    be answered from 8 chunks. Within the alias-filtered scheme the co-managers'
+    sections rank 9th and 11th-23rd, so they were never fetched and the model
+    correctly reported only the manager it could see.
+
+    Raising ``over_fetch`` *alone* is not sufficient and can even hurt: with top_k
+    fixed, a wider candidate pool lets generic Holdings/Understand-terms chunks
+    crowd the manager sections back out of the final k. The two move together.
+
+    **16 was tried and rejected.** It broke the MMR diversity invariant — 15 of 15
+    golden queries came back with a repeated section, because HDFC Large Cap only
+    has 14 distinct sections across its 18 chunks, so a 16-chunk result must pad
+    with duplicates. The fix was to de-duplicate candidates by ``section`` in
+    :func:`app.retrieval._mmr` rather than to pick a smaller k; after that,
+    top_k=12 satisfies both goals at once (2-3 co-managers in context, 0 of 15
+    golden queries repeating a section).
+
+    Cost, measured on corpus fingerprint 449d9e77a656 with ENV=eval: AC1/AC2/AC3/
+    AC7 100%, AC4/AC5/AC6 100%, AC8 15/15, AC9 4/5 — unchanged from (5, 8). The
+    lone AC9 miss ("How do I open a demat account?") is Groww's own help article
+    and fails at every setting.
+    """
+    retrieval_over_fetch: int = 24
     min_similarity: float = 0.25
     """COSINE SIMILARITY, not cosine distance. Chroma returns distance, so
     `similarity = 1.0 - distance` must be computed before thresholding."""
