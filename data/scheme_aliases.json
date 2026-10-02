@@ -1,0 +1,7 @@
+{
+  "hdfc_large_cap":          ["large cap", "hdfc large cap", "largecap"],
+  "hdfc_flexi_cap":          ["flexi cap", "flexicap", "hdfc equity", "hdfc equity fund", "hdfc flexi cap"],
+  "hdfc_elss":               ["elss", "tax saver", "tax saver fund", "hdfc elss", "hdfc tax saver"],
+  "hdfc_small_cap":          ["small cap", "smallcap", "hdfc small cap"],
+  "hdfc_balanced_advantage": ["balanced advantage", "balanced advantage fund", "hdfc balanced advantage"]
+}

@@ -1,0 +1,48 @@
+{
+  "sources_ok": 5,
+  "sources_failed": [],
+  "max_fetched_at": "2026-10-02",
+  "warnings": [],
+  "documents": [
+    {
+      "scheme_id": "hdfc_large_cap",
+      "source_url": "https://groww.in/mutual-funds/hdfc-large-cap-fund-direct-growth",
+      "fetched_at": "2026-10-02",
+      "sections": 17,
+      "extraction_mode": "bs4_heading_walk",
+      "content_sha256": "3f921d02ab13"
+    },
+    {
+      "scheme_id": "hdfc_flexi_cap",
+      "source_url": "https://groww.in/mutual-funds/hdfc-equity-fund-direct-growth",
+      "fetched_at": "2026-10-02",
+      "sections": 17,
+      "extraction_mode": "bs4_heading_walk",
+      "content_sha256": "cf7a3802e974"
+    },
+    {
+      "scheme_id": "hdfc_elss",
+      "source_url": "https://groww.in/mutual-funds/hdfc-elss-tax-saver-fund-direct-plan-growth",
+      "fetched_at": "2026-10-02",
+      "sections": 16,
+      "extraction_mode": "bs4_heading_walk",
+      "content_sha256": "4678f5e4937c"
+    },
+    {
+      "scheme_id": "hdfc_small_cap",
+      "source_url": "https://groww.in/mutual-funds/hdfc-small-cap-fund-direct-growth",
+      "fetched_at": "2026-10-02",
+      "sections": 17,
+      "extraction_mode": "bs4_heading_walk",
+      "content_sha256": "5520f6e30e73"
+    },
+    {
+      "scheme_id": "hdfc_balanced_advantage",
+      "source_url": "https://groww.in/mutual-funds/hdfc-balanced-advantage-fund-direct-growth",
+      "fetched_at": "2026-10-02",
+      "sections": 21,
+      "extraction_mode": "bs4_heading_walk",
+      "content_sha256": "2ee162abbffb"
+    }
+  ]
+}
