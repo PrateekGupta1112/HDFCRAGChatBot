@@ -130,6 +130,58 @@ SETUP_WARNING = (
 )
 
 # --------------------------------------------------------------------------
+# Startup warm-up
+# --------------------------------------------------------------------------
+
+
+@st.cache_resource
+def _warm_resources() -> dict[str, str]:
+    """Load the encoder and open the vector store once, at startup.
+
+    **This must delegate to :func:`app.embedding.get_model`, not construct its
+    own ``SentenceTransformer``.** ``st.cache_resource`` and the module-level
+    ``@lru_cache`` in ``app.embedding`` are two independent caches; a warm-up
+    that loaded the model itself would put **two** copies in memory at once,
+    costing ~350 MB of the ~580 MB this process needs. Returning the existing
+    singleton means this warms the one instance the query path already uses.
+    ``_warm_resources`` asserts that identity rather than trusting it.
+
+    Why warm at all, given the model is already cached per process? Two
+    reasons, and it is worth being precise about what this does and does not
+    achieve, because it is easy to over-claim:
+
+    * **It does not reduce peak memory.** Peak is peak however early you reach
+      it. This cannot stop an out-of-memory kill on a 512 MB instance.
+    * **It moves the cost out of the first user request.** Previously the first
+      question paid ~6 s for the encoder inside the request, which on a cold
+      dyno is a real timeout risk. Now it is paid during startup.
+    * **It makes a fatal misconfiguration fail at deploy time** instead of
+      serving 502s to whoever opens the app first.
+
+    Loading here also warms the vector store, which is the other half of the
+    cold-start cost and is safe to do eagerly: it is a read, and an empty
+    corpus is reported by :func:`_corpus_summary` below rather than raised.
+    """
+    from app.embedding import get_model
+
+    model = get_model()
+    stats = store.corpus_stats()
+
+    # Cheap, but it is the whole point of the function: if this ever starts
+    # loading a *second* encoder, memory doubles silently and nobody notices
+    # until the instance is killed.
+    assert get_model() is model, "warm-up loaded a second copy of the encoder"
+
+    return {
+        "encoder": type(model).__name__,
+        "chunks": str(stats.get("count", 0)),
+        "schemes": str(len(stats.get("schemes") or [])),
+    }
+
+
+_warm = _warm_resources()
+
+# --------------------------------------------------------------------------
 # Data access
 # --------------------------------------------------------------------------
 
