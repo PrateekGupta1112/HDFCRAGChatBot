@@ -216,3 +216,78 @@ def test_corpus_is_empty(tmp_chroma):
     emb = np.zeros((1, 384), dtype=np.float32)
     upsert_chunks([c], emb, force=True)
     assert corpus_is_empty() is False
+
+
+def _one_chunk(chunk_id: str) -> Chunk:
+    """A minimal valid chunk. Zero vectors are fine — the store never encodes."""
+    body = f"body of {chunk_id}"
+    return Chunk(
+        chunk_id=chunk_id,
+        scheme_id="synthetic_a",
+        scheme_name="Synthetic A",
+        category="Test",
+        plan="Direct",
+        section="F",
+        source_url="https://example.com/s1",
+        fetched_at="2026-10-02",
+        chunk_index=0,
+        is_table=False,
+        content_sha256=chunk_id * 8,
+        embed_text=f"[Scheme: A | Cat: T | Plan: D | Section: F]\n{body}",
+        display_text=body,
+    )
+
+
+def test_client_cache_is_keyed_on_path(tmp_path, monkeypatch):
+    """Two ``CHROMA_PATH`` values must never share a client.
+
+    :func:`app.store.get_client` caches the ``PersistentClient``, and the test
+    suite repoints ``CHROMA_PATH`` at a fresh ``tmp_path`` per test. A cache
+    keyed on nothing would hand every later test the first test's client, so each
+    test would read another test's corpus — silent and order-dependent, which is
+    the hardest kind of test failure to diagnose.
+
+    The assertions deliberately **read only**. An earlier version of this test
+    rebuilt each corpus with ``force=True`` as it went, which hid the bug
+    completely: ``force=True`` deletes and recreates whatever collection the
+    client points at, so a polluted client still ends up reporting the count the
+    test had just written. Seeding first and then only reading is what makes the
+    two paths distinguishable.
+    """
+    from app import config
+    from app.store import corpus_stats, get_client, upsert_chunks
+
+    def point_at(path):
+        monkeypatch.setenv("CHROMA_PATH", str(path))
+        config.get_settings.cache_clear()
+
+    def seed(path, chunk_ids):
+        point_at(path)
+        chunks = [_one_chunk(cid) for cid in chunk_ids]
+        vecs = np.zeros((len(chunks), 384), dtype=np.float32)
+        upsert_chunks(chunks, vecs, force=True)
+
+    dir_a, dir_b = tmp_path / "a", tmp_path / "b"
+    seed(dir_a, ["aaa", "bbb", "ccc"])
+    seed(dir_b, ["xxx"])
+
+    point_at(dir_a)
+    client_a = get_client()
+    assert corpus_stats()["count"] == 3
+
+    point_at(dir_b)
+    client_b = get_client()
+    assert corpus_stats()["count"] == 1, "B read A's corpus"
+
+    # Same path must still hit the cache; a different path must not have evicted it.
+    point_at(dir_a)
+    assert get_client() is client_a, "A's client was not reused"
+    assert client_a is not client_b, "two paths shared one client"
+    assert corpus_stats()["count"] == 3, "A's corpus was clobbered by B"
+
+
+def test_get_client_reuses_one_client_per_path(tmp_chroma):
+    """The cache must actually hit, or it is pure overhead."""
+    from app.store import get_client
+
+    assert get_client() is get_client()

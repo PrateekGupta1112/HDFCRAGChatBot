@@ -130,38 +130,26 @@ SETUP_WARNING = (
 )
 
 # --------------------------------------------------------------------------
-# Cached resources
-# --------------------------------------------------------------------------
-
-
-@st.cache_resource
-def _collection():
-    """The Chroma collection handle, cached for the life of the server process.
-
-    Streamlit re-executes this whole script on every click and every keystroke,
-    and :func:`app.store.get_client` constructs a fresh ``PersistentClient`` on
-    each call — re-opening the HNSW index every time. Caching here is what keeps
-    a rerun at tens of milliseconds rather than seconds (§P9 gotchas).
-
-    The embedding model needs the same treatment and does not need any: it is
-    reached through :func:`app.embedding.get_model`, which is already
-    ``@lru_cache(maxsize=1)`` at module scope, so it is loaded once per server
-    process and survives reruns on its own. §P9 restricts this file's imports to
-    ``config``, ``disclaimer``, ``pipeline`` and ``store``, so it cannot import
-    ``app.embedding`` to wrap it — it is warmed lazily by the first answered turn
-    instead, which is why the very first question takes a couple of seconds
-    longer than the ones after it.
-    """
-    return store.get_collection()
-
-
-# --------------------------------------------------------------------------
 # Data access
 # --------------------------------------------------------------------------
 
 
 def _corpus_summary() -> dict[str, Any]:
-    """Fingerprint, counts and scheme coverage, read once per render."""
+    """Fingerprint, counts and scheme coverage, read once per render.
+
+    Called at module scope, so it runs on **every** Streamlit rerun — every
+    keystroke as well as every click — and each of the two store calls reads the
+    full metadata set. That is why it is not cached here: a cached fingerprint
+    or count would survive ``python -m app.ingest`` and the UI would then report
+    a corpus it is no longer serving.
+
+    What made this affordable instead is fixing the cost underneath. A
+    ``@st.cache_resource`` collection used to sit in this file for exactly this
+    reason and was never called by anything, so it bought nothing; it has been
+    removed. The client it was standing in for is now cached per path in
+    :func:`app.store.get_client`, which every caller shares — this file, the
+    pipeline and retrieval alike — instead of one function in one file.
+    """
     stats = store.corpus_stats()
     return {
         "fingerprint": store.corpus_fingerprint(),

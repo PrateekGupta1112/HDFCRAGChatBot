@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 from dataclasses import asdict, fields
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -16,20 +17,49 @@ from app.errors import CorpusEmptyError
 logger = logging.getLogger(__name__)
 
 
-def get_client() -> "chromadb.Client":
-    """Return a Chroma PersistentClient for the configured path."""
+@lru_cache(maxsize=4)
+def _client_for(chroma_path: str) -> "chromadb.Client":
+    """Construct one PersistentClient per path and keep it.
+
+    **Keyed on the resolved path, not on nothing.** A bare ``@lru_cache`` here
+    would hand every caller the client built for whoever asked first — and the
+    test suite repoints ``CHROMA_PATH`` at a fresh ``tmp_path`` per test, so that
+    is not hypothetical: every test after the first would read the previous
+    test's corpus. Keying on the path makes a changed path a cache *miss*
+    instead, which needs no invalidation hook and cannot go stale.
+
+    ``maxsize=4`` is headroom for a test session that cycles through a few
+    directories. In the app there is exactly one path, so this is one client for
+    the life of the process and every lookup is a hit.
+    """
     try:
         import chromadb
     except Exception as exc:  # pragma: no cover - import guard
         raise RuntimeError("chromadb is not available. Install requirements first.") from exc
 
-    settings = get_settings()
-    client = chromadb.PersistentClient(path=settings.chroma_path)
-    return client
+    return chromadb.PersistentClient(path=chroma_path)
+
+
+def get_client() -> "chromadb.Client":
+    """Return a Chroma PersistentClient for the configured path.
+
+    Cached per path — see :func:`_client_for`. This was ~12 ms per call, and one
+    question makes several: ``corpus_stats``, ``corpus_fingerprint``,
+    ``corpus_is_empty`` and ``retrieve`` each open their own client. The Streamlit
+    front end is worse, because it re-executes on every keystroke.
+    """
+    return _client_for(get_settings().chroma_path)
 
 
 def get_collection() -> "chromadb.Collection":
-    """Get or create the configured Chroma collection with cosine space."""
+    """Get or create the configured Chroma collection with cosine space.
+
+    Not cached, deliberately. ``get_or_create_collection`` re-reads collection
+    metadata from SQLite every call, which is what lets an ingest that deleted
+    and recreated the collection be visible immediately. With the client cached
+    this is ~2 ms; caching the handle on top would save little and would go stale
+    across ``upsert_chunks(force=True)``.
+    """
     try:
         from chromadb.api import Collection  # type: ignore
     except Exception:  # pragma: no cover

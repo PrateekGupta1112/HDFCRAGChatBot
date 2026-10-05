@@ -25,7 +25,7 @@ from typing import Any
 import numpy as np
 
 from app.config import Settings, get_settings
-from app.embedding import embed_texts
+from app.embedding import embed_one, embed_texts
 from app.errors import CorpusEmptyError
 from app.scheme_aliases import resolve_scheme_id
 from app.store import corpus_is_empty, get_collection
@@ -44,6 +44,47 @@ _CONTEXT_HEADER_MARKER = "[Scheme:"
 #: clamped rather than trusted. A corpus smaller than ``over_fetch`` is a real
 #: situation in tests and in a freshly-seeded collection.
 _MIN_CHROMA_N_RESULTS = 1
+
+# ==========================================================================
+# Why `retrieve` embeds the query itself instead of passing `query_texts`
+# ==========================================================================
+#
+# ``collection.query(query_texts=[q])`` looks like it delegates the embedding,
+# and it does — to Chroma's **own default** embedding function: a second,
+# independent copy of all-MiniLM-L6-v2 that this project never configures and
+# cannot see. In chromadb 1.5.9 that default is also rebuilt on *every* call::
+#
+#     DefaultEmbeddingFunction.__call__   ->  ONNXMiniLM_L6_V2()(input)
+#     ONNXMiniLM_L6_V2.model              ->  @cached_property
+#
+# The ``@cached_property`` lives on the *instance*, and the instance is built
+# inside ``__call__``, so the cache is discarded along with it. Every query
+# re-loaded a 90 MB ``model.onnx`` from ``~/.cache/chroma/onnx_models/`` and
+# re-ran onnxruntime's ``ORT_ENABLE_ALL`` graph optimisation — 0.33 s of session
+# construction on top of 0.11 s of genuine inference.
+#
+# Embedding the query here costs nothing extra: :func:`app.embedding.get_model`
+# is already ``@lru_cache(maxsize=1)``, so this reuses the very instance
+# ingestion used. Measured over 30 retrieves: **one** model built
+# (``hits=73, misses=1``), **zero** ONNX sessions, median ``retrieve()``
+# 0.67 s → 0.06 s.
+#
+# It also retires the reason there were two encoders to keep in sync. The
+# weights are the same, so scores agree to float32 noise (~1.2e-7), and the
+# closest candidate to ``min_similarity`` is 0.31 away — far too wide for that
+# noise to change a threshold decision. Documents and query now provably come
+# from one code path, which is also what MMR's re-embedding of candidates
+# (``embed_texts``, same singleton) has always assumed.
+#
+# **Do not "simplify" this back to ``query_texts=``.** The idiomatic fix — an
+# explicit ``embedding_function=`` on ``get_or_create_collection`` — is *not*
+# available for this collection: its schema has persisted
+# ``{"type":"known","name":"default"}``, and
+# ``validate_embedding_function_conflict_on_get`` rejects any function whose
+# ``.name()`` differs, so it raises instead of quietly working.
+# ``test_retrieve_never_hands_embedding_to_chroma`` fails loudly on a revert,
+# because a revert otherwise changes nothing but the latency.
+_QUERY_EMBEDDING_NOTE = "query is embedded by app.embedding, never by Chroma's EF"
 
 
 @dataclass(frozen=True)
@@ -346,10 +387,12 @@ def retrieve(
     # chunks is a legitimate state during development.
     n_results = max(_MIN_CHROMA_N_RESULTS, min(n_fetch, available))
 
+    # The query is embedded here, not handed to Chroma as text. See
+    # `_QUERY_EMBEDDING_NOTE` above for why that is not a style preference.
     where = {"scheme_id": scheme_id} if scheme_id else None
     try:
         response = collection.query(
-            query_texts=[query],
+            query_embeddings=[embed_one(query).tolist()],
             n_results=n_results,
             where=where,
             include=["documents", "metadatas", "distances"],

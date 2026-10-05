@@ -93,15 +93,18 @@ def synthetic_corpus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     ``test_similarity_is_exactly_one_minus_chroma_distance`` avoids trusting
     ``app.retrieval``'s own arithmetic.
 
-    The chunks are embedded with the **real** encoder, not a stub. Chroma embeds
-    the query with its own copy of the same model, so a synthetic vector in some
-    other space makes the cosine meaningless and the similarity assertions test
-    nothing. ``chunks.jsonl`` and the fixture therefore live in one space, and
-    identical fixture text produces an identical vector — which is what lets the
-    near-duplicate MMR case be expressed without a stub at all.
+    The chunks are embedded with the **real** encoder, not a stub. A synthetic
+    vector in some other space makes the cosine meaningless and the similarity
+    assertions test nothing. This matters even more now that ``retrieve``
+    embeds the query through ``app.embedding`` itself — documents and query
+    come from the *same* ``@lru_cache``d model, so they are provably in one
+    space rather than two copies that happen to agree. ``chunks.jsonl`` and the
+    fixture therefore live in one space, and identical fixture text produces an
+    identical vector — which is what lets the near-duplicate MMR case be
+    expressed without a stub at all.
     """
     from app import config
-    from app.embedding import embed_texts
+    from app.embedding import embed_one, embed_texts
     from app.store import get_collection, upsert_chunks
 
     monkeypatch.setenv("CHROMA_PATH", str(tmp_path / "chroma"))
@@ -141,11 +144,13 @@ def test_similarity_is_exactly_one_minus_chroma_distance(synthetic_corpus) -> No
     If this assertion ever fails, the bot either refuses everything or answers
     everything.
     """
+    from app.embedding import embed_one
+
     query = "what is the expense ratio"
     result = retrieve(query, min_sim=-1.0, use_mmr=False)
 
     raw = synthetic_corpus.query(
-        query_texts=[query],
+        query_embeddings=[embed_one(query).tolist()],
         n_results=synthetic_corpus.count(),
         include=["distances"],
     )
@@ -155,6 +160,80 @@ def test_similarity_is_exactly_one_minus_chroma_distance(synthetic_corpus) -> No
     assert reported <= expected, (
         f"similarities {reported} are not in the set Chroma implies {expected}"
     )
+
+
+def test_retrieve_never_hands_embedding_to_chroma(
+    synthetic_corpus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The query vector must come from ``app.embedding``, never from Chroma's EF.
+
+    ``collection.query(query_texts=[q])`` delegates the embedding to Chroma's
+    **default** embedding function — a second copy of all-MiniLM-L6-v2 that this
+    project never configures. In chromadb 1.5.9 that default is rebuilt per call:
+    ``DefaultEmbeddingFunction.__call__`` constructs a fresh ``ONNXMiniLM_L6_V2``,
+    and ``ONNXMiniLM_L6_V2.model`` is a ``@cached_property`` on the instance, so
+    the cache dies with it. Every query re-loaded a 90 MB ``model.onnx`` and
+    re-ran onnxruntime graph optimisation — 0.33 s of session construction on top
+    of 0.11 s of real inference.
+
+    Passing ``query_embeddings=`` costs nothing extra because
+    ``app.embedding.get_model`` is already ``@lru_cache(maxsize=1)``: measured
+    over 30 retrieves, one model built and zero ONNX sessions, median
+    ``retrieve()`` 0.67 s → 0.06 s.
+
+    Nothing else in the suite catches a revert to ``query_texts=``, and a revert
+    fails silently — same answers, ten times the latency. So the EF is booby
+    trapped here: if Chroma is asked to embed anything, this raises.
+    """
+    from chromadb.api.types import DefaultEmbeddingFunction
+
+    class _ChromaEmbeddedQuery(BaseException):
+        """Derives from BaseException so ``retrieve``'s ``except Exception`` cannot swallow it.
+
+        That handler is correct in production — a Chroma failure becomes a NOT_FOUND
+        answer, never a crash — but here it would downgrade the real cause into
+        "retrieve returned nothing", which says nothing about the actual mistake.
+        """
+
+    # The signature must mirror the real one exactly: Chroma's
+    # `validate_embedding_function` introspects it and runs on every
+    # `get_or_create_collection`, so a mismatch fails collection setup — which
+    # `corpus_is_empty` then swallows into a misleading CorpusEmptyError.
+    def explode(self, input):  # noqa: A002 - the names are Chroma's contract
+        raise _ChromaEmbeddedQuery(
+            "Chroma was asked to embed the query. Its default embedding function is "
+            "rebuilt on every call and reloads a second 90 MB copy of the model; pass "
+            "query_embeddings= instead. See _QUERY_EMBEDDING_NOTE in app/retrieval.py."
+        )
+
+    monkeypatch.setattr(DefaultEmbeddingFunction, "__call__", explode)
+
+    seen: dict = {}
+
+    class _Spy:
+        """Delegates to the real collection, recording the query kwargs."""
+
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def query(self, **kwargs):
+            seen.update(kwargs)
+            return self._real.query(**kwargs)
+
+    monkeypatch.setattr("app.retrieval.get_collection", lambda: _Spy(synthetic_corpus))
+
+    result = retrieve("what is the expense ratio", min_sim=-1.0, use_mmr=False)
+
+    assert result.chunks, "retrieve returned nothing, so the spy never saw a query"
+    assert "query_texts" not in seen, (
+        "the query was handed to Chroma as text, which rebuilds its embedding "
+        "function on every call"
+    )
+    assert len(seen["query_embeddings"]) == 1
+    assert len(seen["query_embeddings"][0]) == EMBED_DIM
 
 
 def test_all_similarities_are_within_unit_range(synthetic_corpus) -> None:
